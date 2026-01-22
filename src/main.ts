@@ -1,15 +1,15 @@
-import { BrowserContext, chromium, FrameLocator, Locator, Page } from "playwright";
+import { BrowserContext, chromium, Locator, Page } from "playwright";
 import * as fs from "node:fs";
 import dotenv from "dotenv";
 
 type LogLevel = "log" | "info" | "warn" | "error";
 
-type ArticoloDaFare = {
+type ArticoloDaConfigurare = {
     famiglia: string,
     prodotto: string,
 };
 
-type ArticoloConfigurato = ArticoloDaFare & {
+type ArticoloConfigurato = ArticoloDaConfigurare & {
     priorita: string,
 };
 
@@ -35,12 +35,14 @@ function applyLogLevel(): void {
     }
 }
 
-function getArticoliDaFare(): ArticoloDaFare[] {
+function getArticoliDaFare(): ArticoloDaConfigurare[] {
     return fs
         .readFileSync("../static/pris_articoli_da_fare.csv", "utf-8")
         .split("\n")
         // Skip header line
         .slice(1)
+        // Filter out empty lines
+        .filter(l => l.trim().length > 0)
         .map(l => {
             const [ famiglia, prodotto ] = l.split(",");
             return { famiglia, prodotto };
@@ -59,10 +61,12 @@ async function countRowsInTBody(trLocator: Locator, page: Page): Promise<number>
     return count;
 }
 
-async function handleConfigurazionePerArticolo(articoloDaFare: ArticoloDaFare, articoliPrisPage: Page, nth: number): Promise<ArticoloConfigurato | undefined> {
+async function handleConfigurazionePerArticolo(articoloDaConfigurare: ArticoloDaConfigurare, articoliPrisPage: Page, nth: number): Promise<ArticoloConfigurato | undefined> {
     type OptionalValue<T> = { present: true, value: T } | { present: false };
 
     type Attivita = {
+        idModello: string,
+        prioritaModello: string,
         codice: string;
         operazione: string;
         ok: OptionalValue<boolean>,
@@ -73,7 +77,10 @@ async function handleConfigurazionePerArticolo(articoloDaFare: ArticoloDaFare, a
     const prioritaCellInnerText: string =
         await articoliPrisPage.locator(`#id_table_pris_articoli > tbody > tr:nth-child(${nth}) > td:nth-child(4)`).innerText();
 
-    if (prioritaCellInnerText === "J") {
+    if (prioritaCellInnerText !== "J") {
+        console.info(`SKIP: priorità diversa da J per l'articolo ${articoloDaConfigurare.prodotto} (priorità: ${prioritaCellInnerText}).`);
+    }
+    else {
         try {
             // Click su modifica
             await articoliPrisPage.click(`#id_table_pris_articoli > tbody > tr:nth-child(${nth}) > td.text-right.all.avoid-selection > a.btn.btn-blue`);
@@ -87,7 +94,9 @@ async function handleConfigurazionePerArticolo(articoloDaFare: ArticoloDaFare, a
             const attivitaModelloCount: number = await countRowsInTBody(attivitaModelloRowLocator, articoliPrisPage);
 
             if (attivitaModelloCount === 0 || await attivitaModelloRowLocator.nth(0).locator("td:nth-child(1)").getAttribute("class") === "dataTables_empty") {
-                throw "Modello con priorità J senza attività";
+                console.error("Trovato modello con priorità J senza attività per l'articolo:", articoloDaConfigurare);
+                await articoliPrisPage.click("#id_pris_articoli_configForm > div.modal-footer > button.btn.btn-white");
+                return undefined;
             }
 
             const elencoAttivitaModelloPrioritaJ: Attivita[] = [];
@@ -98,16 +107,24 @@ async function handleConfigurazionePerArticolo(articoloDaFare: ArticoloDaFare, a
                     attivitaModelloRowLocator.nth(i).locator("td:nth-child(9) > div > div > input"),
                 ];
 
-                const [ operazione, codice, ok, ko, costoAttivita ]: [
-                    string, string, OptionalValue<boolean>, OptionalValue<boolean>, OptionalValue<number>
+                const [ idModello, prioritaModello, operazione, codice, ok, ko, costoAttivita ]: [
+                    string,
+                    string,
+                    string,
+                    string,
+                    OptionalValue<boolean>,
+                    OptionalValue<boolean>,
+                    OptionalValue<number>
                 ] = [
+                    await attivitaModelloRowLocator.nth(i).locator("td:nth-child(1)").first().innerText(),
+                    await attivitaModelloRowLocator.nth(i).locator("td:nth-child(2)").innerText(),
                     await attivitaModelloRowLocator.nth(i).locator("td:nth-child(3)").innerText(),
                     await attivitaModelloRowLocator.nth(i).locator("td:nth-child(4)").innerText(),
                     await (async (): Promise<OptionalValue<boolean>> => {
                         if (await okThumbLocator.count() > 0) {
                             return {
                                 present: true,
-                                value: !!(await okThumbLocator.getAttribute("class"))?.includes("thumb-up"),
+                                value: !!(await okThumbLocator.getAttribute("class"))?.includes("thumbs-up"),
                             };
                         }
                         return { present: false };
@@ -116,7 +133,7 @@ async function handleConfigurazionePerArticolo(articoloDaFare: ArticoloDaFare, a
                         if (await koThumbLocator.count() > 0) {
                             return {
                                 present: true,
-                                value: !!(await koThumbLocator.getAttribute("class"))?.includes("thumb-up"),
+                                value: !!(await koThumbLocator.getAttribute("class"))?.includes("thumbs-up"),
                             };
                         }
                         return { present: false };
@@ -132,7 +149,7 @@ async function handleConfigurazionePerArticolo(articoloDaFare: ArticoloDaFare, a
                     })()
                 ];
 
-                elencoAttivitaModelloPrioritaJ.push({ operazione, codice, ok, ko, costoAttivita });
+                elencoAttivitaModelloPrioritaJ.push({ idModello, prioritaModello, operazione, codice, ok, ko, costoAttivita });
                 console.log(elencoAttivitaModelloPrioritaJ);
             }
 
@@ -147,7 +164,7 @@ async function handleConfigurazionePerArticolo(articoloDaFare: ArticoloDaFare, a
             // Clicca sulla combobox
             await articoliPrisPage.click("#id_pris_articoli_configForm > div.modal-body > div:nth-child(1) > div > span");
             // Cerca i modelli disponibili per l'articolo da fare
-            await articoliPrisPage.fill("body > span > span > span.select2-search.select2-search--dropdown > input", articoloDaFare.prodotto);
+            await articoliPrisPage.fill("body > span > span > span.select2-search.select2-search--dropdown > input", articoloDaConfigurare.prodotto);
 
             // Clicca sulla prima opzione
             await articoliPrisPage.click("#select2-id_pris_articoli_codice-results > li:nth-child(1)");
@@ -158,6 +175,7 @@ async function handleConfigurazionePerArticolo(articoloDaFare: ArticoloDaFare, a
             const modelliDisponibiliRowsLocator: Locator = articoliPrisPage.locator("#id_table_panth_modprod > tbody > tr");
             const modelliDisponibiliCount: number = await countRowsInTBody(modelliDisponibiliRowsLocator, articoliPrisPage);
 
+            let modelloTrovato: boolean = false;
             for (let i = 0; i < modelliDisponibiliCount; i++) {
                 // Clicca sul modello (i)
                 await modelliDisponibiliRowsLocator.nth(i).click();
@@ -165,15 +183,16 @@ async function handleConfigurazionePerArticolo(articoloDaFare: ArticoloDaFare, a
                 // Mostra 100 attività
                 await articoliPrisPage.selectOption("#id_table_panth_modprod_d_length > label > select", "100");
 
-                const attivitaModelloPanthRowLocator: Locator = articoliPrisPage.locator("#id_table_panth_modprod_d > tbody");
+                const attivitaModelloPanthRowLocator: Locator = articoliPrisPage.locator("#id_table_panth_modprod_d > tbody > tr");
                 const attivitaModelloPanthCount: number = await countRowsInTBody(attivitaModelloPanthRowLocator, articoliPrisPage);
 
                 // Se il numero di attività non coincide, vai al modello successivo
                 if (attivitaModelloPanthCount !== elencoAttivitaModelloPrioritaJ.length) continue;
 
+                let attivitaNonCoincidente: Attivita | undefined;
                 for (let j = 0; j < attivitaModelloPanthCount; j++) {
                     const [ operazione, codice ]: [ string, string ] = [
-                        await attivitaModelloPanthRowLocator.nth(j).locator("td:nth-child(1)").innerText(),
+                        await attivitaModelloPanthRowLocator.nth(j).locator("td.text-left.all.sorting_1.dtr-control").innerText(),
                         await attivitaModelloPanthRowLocator.nth(j).locator("td:nth-child(2)").innerText(),
                     ];
 
@@ -181,36 +200,85 @@ async function handleConfigurazionePerArticolo(articoloDaFare: ArticoloDaFare, a
                     if (
                         operazione !== elencoAttivitaModelloPrioritaJ[j].operazione ||
                         codice !== elencoAttivitaModelloPrioritaJ[j].codice
-                    ) break;
+                    ) {
+                        attivitaNonCoincidente = elencoAttivitaModelloPrioritaJ[j];
+                    }
                 }
 
-                // Se tutte le attività coincidono, seleziona il modello
-                await articoliPrisPage.click("#id_table_panth_modprod > tbody > tr > td.text-left.all.dtr-control > a");
+                if (!attivitaNonCoincidente) {
+                    // Se tutte le attività coincidono, seleziona il modello
+                    modelloTrovato = true;
+                    await modelliDisponibiliRowsLocator.nth(i).locator("td.text-left.all.dtr-control > a").click();
+                    break;
+                }
 
-                // Importa il modello
-                await articoliPrisPage.evaluate(() => {
-                    alert("TROVATA CONFIGURAZIONE CHE COINCIDE!!!");
-                })
-                await articoliPrisPage.click("#id_pris_articoli_modprod_modal_importa");
-
-                // TODO implement
+                console.info("La seguente attività non coincide:", attivitaNonCoincidente);
             }
 
-            // TODO implement
+            if (!modelloTrovato) {
+                console.error(`Nessun modello trovato per l'articolo ${articoloDaConfigurare}`);
+                // Chiudi la finestra con l'elenco dei modelli disponibili
+                await articoliPrisPage.click("#id_pris_articoli_modprod_modal > div > div > div.modal-footer > button.btn.btn-white");
+                // Chiudi la finestra "Configura Modello" (nuovo modello)
+                await articoliPrisPage.click("#id_pris_articoli_configForm > div.modal-footer > button.btn.btn-white");
+                return undefined;
+            }
 
-            // Fallback se le configurazioni trovate non vanno bene
-            await articoliPrisPage.evaluate(() => alert("Seleziona una configurazione da applicare..."))
+            // Importa il modello
+            await articoliPrisPage.click("#id_pris_articoli_modprod_modal_importa");
+            // Aspetta che la finestra di importazione sia chiusa
+            await articoliPrisPage.locator("#id_pris_articoli_modprod_modal").waitFor({ state: "hidden", timeout: 0 });
+
+            // Mostra 100 attività
+            await articoliPrisPage.selectOption("#id_table_pris_articoli_modprod_length > label > select", "100");
+
+            // Configura il modello nuovo con i parametri del modello vecchio (priorità J = vecchio)
+            for (let i = 0, nth = 1; i < elencoAttivitaModelloPrioritaJ.length; i++, nth++) {
+                const attivita: Attivita = elencoAttivitaModelloPrioritaJ[i];
+                const attivitaModelloConfigRowLocator: Locator = articoliPrisPage.locator(`#id_table_pris_articoli_modprod > tbody > tr:nth-child(${nth})`);
+
+                if (attivita.ok.present && attivita.ok.value) {
+                    await attivitaModelloConfigRowLocator.locator("td:nth-child(7) > a").click();
+                }
+                if (attivita.ko.present && attivita.ko.value) {
+                    await attivitaModelloConfigRowLocator.locator("td:nth-child(8) > a").click();
+                }
+                if (attivita.costoAttivita.present && attivita.costoAttivita.value) {
+                    await attivitaModelloConfigRowLocator.locator("td:nth-child(9)").fill(String(attivita.costoAttivita));
+                }
+            }
+
+            await articoliPrisPage.evaluate(() => alert("Verifica la configurazione. Se ritieni che sia corretta, clicca su \"Salva\", altrimenti su \"Chiudi\". Clicca \"Ok\" per chiudere questo messaggio."));
+
+            // Aspetta che l'utente abbia schiacciato su "Chiudi" o "Salva"
+            await articoliPrisPage.locator("#id_pris_articoli_config_modal").waitFor({ state: "hidden", timeout: 0 });
+
+            return {
+                ...articoloDaConfigurare,
+                priorita: elencoAttivitaModelloPrioritaJ[0].prioritaModello,
+            };
+
+            // // Fallback se le configurazioni trovate non vanno bene
+            // const alertMessage: string = `Seleziona una configurazione da applicare per l'articolo:
+            //     \nCodice: ${articoloDaConfigurare.prodotto}
+            //     \nFamiglia: ${articoloDaConfigurare.famiglia}
+            //     \nID modello corrispondente (priorità J): ${elencoAttivitaModelloPrioritaJ[0].idModello}`;
+            //
+            // await articoliPrisPage.evaluate((msg: string) => alert(msg), alertMessage);
+            //
+            // // Aspetta che l'utente abbia schiacciato su "Chiudi" o "Importa"
+            // await articoliPrisPage.locator("#id_pris_articoli_modprod_modal").waitFor({ state: "hidden", timeout: 0 });
+            //
+            // // Aspetta che l'utente abbia configurato manualmente il modello
+
         }
         catch (e) {
             console.error(e);
+
+            // TODO logga l'articolo da fare
+
             return undefined;
         }
-        finally {
-            await articoliPrisPage.click("#id_pris_articoli_configForm > div.modal-footer > button.btn.btn-white");
-        }
-    }
-    else {
-        console.info(`SKIP: priorità diversa da J per l'articolo ${articoloDaFare.prodotto} (priorità: ${prioritaCellInnerText}).`);
     }
 
     // TODO remove
@@ -220,7 +288,7 @@ async function handleConfigurazionePerArticolo(articoloDaFare: ArticoloDaFare, a
 (async function main() {
     applyLogLevel();
 
-    const articoliDaFare: ArticoloDaFare[] = getArticoliDaFare();
+    const articoliDaFare: ArticoloDaConfigurare[] = getArticoliDaFare();
     const articoliDaFareCount: number = articoliDaFare.length;
 
     console.info("Articoli da fare:", articoliDaFare);
@@ -256,7 +324,7 @@ async function handleConfigurazionePerArticolo(articoloDaFare: ArticoloDaFare, a
 
     const articoliPrisPage = homepage;
 
-    const articoliFatti: ArticoloDaFare[] = [];
+    const articoliFatti: ArticoloDaConfigurare[] = [];
     for (const articoloDaFare of articoliDaFare) {
         await articoliPrisPage.fill("#id_table_famiglie_filter > label > input", articoloDaFare.famiglia);
         await articoliPrisPage.click("#id_table_famiglie > tbody > tr:nth-child(1)");
@@ -277,7 +345,6 @@ async function handleConfigurazionePerArticolo(articoloDaFare: ArticoloDaFare, a
                 await handleConfigurazionePerArticolo(articoloDaFare, articoliPrisPage, nth);
             }
         }
-
     }
 
     // await browser.close();
