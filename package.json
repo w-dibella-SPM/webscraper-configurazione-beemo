@@ -8,9 +8,11 @@
     "build": "tsc"
   },
   "dependencies": {
+    "dotenv": "^17.2.3",
     "playwright": "^1.57.0"
   },
   "devDependencies": {
+    "@types/dotenv": "^6.1.1",
     "@types/node": "^25.0.9",
     "typescript": "^5.5.3"
   },
