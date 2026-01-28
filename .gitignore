@@ -12,3 +12,5 @@ yarn-error.log*
 
 .env*
 !.env.placeholder
+
+*.log

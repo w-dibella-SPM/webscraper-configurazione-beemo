@@ -1,4 +1,5 @@
-import { BrowserContext, chromium, Locator, Page } from "playwright";
+import type { BrowserContext, Locator, Page } from "playwright";
+import { chromium } from "playwright";
 import * as fs from "node:fs";
 import dotenv from "dotenv";
 
@@ -16,6 +17,15 @@ type ArticoloConfigurato = ArticoloDaConfigurare & {
 dotenv.config({
     path: "../.env",
 });
+
+const LOG_MESSAGE_PREFIX = {
+    SKIP: "SKIP",
+    NO_ACTIVITIES_IN_MODEL: "NO_ACTIVITIES_IN_MODEL",
+    NO_MODEL_FOUND: "NO_MODEL_FOUND",
+    NO_BEEMO_CONFIG_FOUND: "NO_BEEMO_CONFIG_FOUND",
+    PRODUCT_CONFIGURED_SUCCESSFULLY: "PRODUCT_CONFIGURED_SUCCESSFULLY",
+    CONFIGURATION_NOT_SAVED_BY_USER: "CONFIGURATION_NOT_SAVED_BY_USER",
+};
 
 const SM2CARE_USERNAME: string = process.env.SM2CARE_USERNAME || "";
 const SM2CARE_PASSWORD: string = process.env.SM2CARE_PASSWORD || "";
@@ -35,27 +45,40 @@ function applyLogLevel(): void {
     }
 }
 
-function getArticoliDaFare(): ArticoloDaConfigurare[] {
-    return fs
+function getArticoliDaConfigurare(): Map<string, ArticoloDaConfigurare> {
+    const entries = fs
         .readFileSync("../static/pris_articoli_da_fare.csv", "utf-8")
         .split("\n")
-        // Skip header line
         .slice(1)
-        // Filter out empty lines
         .filter(l => l.trim().length > 0)
         .map(l => {
-            const [ famiglia, prodotto ] = l.split(",");
-            return { famiglia, prodotto };
+            const [ famiglia, prodotto ] = l.split(",").map(s => s.trim());
+            return [ `${famiglia}${prodotto}`, { famiglia, prodotto }] as [string, ArticoloDaConfigurare];
         });
+
+    return new Map(entries);
+}
+
+function saveArticoliDaConfigurare(articoliDaConfigurare: Map<string, ArticoloDaConfigurare>, articoliConfigurati: Map<string, ArticoloConfigurato>): void {
+    const lines: string[] = ["Famiglia,Prodotto"];
+    for (const [keyArticoloDaConfigurare, articoloDaConfigurare] of articoliDaConfigurare) {
+        if (!articoliConfigurati.has(keyArticoloDaConfigurare)) {
+            lines.push(`${articoloDaConfigurare.famiglia},${articoloDaConfigurare.prodotto}`);
+        }
+    }
+
+    fs.writeFileSync("../static/pris_articoli_da_fare.csv", lines.join("\n"));
 }
 
 async function countRowsInTBody(trLocator: Locator, page: Page): Promise<number> {
+    await page.waitForLoadState("networkidle");
+
     let prevCount: number = -1;
     let count: number = await trLocator.count();
 
     while (prevCount !== count) {
         prevCount = count;
-        await page.waitForTimeout(100);
+        await page.waitForTimeout(500);
         count = await trLocator.count();
     }
     return count;
@@ -72,13 +95,14 @@ async function handleConfigurazionePerArticolo(articoloDaConfigurare: ArticoloDa
         ok: OptionalValue<boolean>,
         ko: OptionalValue<boolean>,
         costoAttivita: OptionalValue<number>;
+        costoIndustrialeModello: number;
     };
 
     const prioritaCellInnerText: string =
         await articoliPrisPage.locator(`#id_table_pris_articoli > tbody > tr:nth-child(${nth}) > td:nth-child(4)`).innerText();
 
     if (prioritaCellInnerText !== "J") {
-        console.info(`SKIP: priorità diversa da J per l'articolo ${articoloDaConfigurare.prodotto} (priorità: ${prioritaCellInnerText}).`);
+        console.info(`${LOG_MESSAGE_PREFIX.SKIP}: priorità diversa da J per l'articolo ${articoloDaConfigurare.prodotto} (priorità: ${prioritaCellInnerText}).`);
     }
     else {
         try {
@@ -93,11 +117,14 @@ async function handleConfigurazionePerArticolo(articoloDaConfigurare: ArticoloDa
             const attivitaModelloRowLocator: Locator = articoliPrisPage.locator("#id_table_pris_articoli_modprod > tbody > tr");
             const attivitaModelloCount: number = await countRowsInTBody(attivitaModelloRowLocator, articoliPrisPage);
 
-            if (attivitaModelloCount === 0 || await attivitaModelloRowLocator.nth(0).locator("td:nth-child(1)").getAttribute("class") === "dataTables_empty") {
-                console.error("Trovato modello con priorità J senza attività per l'articolo:", articoloDaConfigurare);
+            if (attivitaModelloCount === 0 || await attivitaModelloRowLocator.nth(0).locator("td").nth(0).getAttribute("class") === "dataTables_empty") {
+                console.error(`${LOG_MESSAGE_PREFIX.NO_ACTIVITIES_IN_MODEL}: trovato modello con priorità J senza attività per l'articolo:`, articoloDaConfigurare);
                 await articoliPrisPage.click("#id_pris_articoli_configForm > div.modal-footer > button.btn.btn-white");
                 return undefined;
             }
+
+            // Prendi il costo industriale del modello
+            const costoIndustrialeModello: number = Number(await articoliPrisPage.inputValue("#id_pris_articoli_costo_industriale"));
 
             const elencoAttivitaModelloPrioritaJ: Attivita[] = [];
             for (let i = 0, nth = 1; i < attivitaModelloCount; i++, nth++) {
@@ -149,9 +176,18 @@ async function handleConfigurazionePerArticolo(articoloDaConfigurare: ArticoloDa
                     })()
                 ];
 
-                elencoAttivitaModelloPrioritaJ.push({ idModello, prioritaModello, operazione, codice, ok, ko, costoAttivita });
-                console.log(elencoAttivitaModelloPrioritaJ);
+                elencoAttivitaModelloPrioritaJ.push({
+                    idModello,
+                    prioritaModello,
+                    operazione,
+                    codice,
+                    ok,
+                    ko,
+                    costoAttivita,
+                    costoIndustrialeModello
+                });
             }
+            console.info("Elenco attività modello priorità J:", elencoAttivitaModelloPrioritaJ);
 
             // Chiudi la finestra di modifica
             await articoliPrisPage.click("#id_pris_articoli_configForm > div.modal-footer > button.btn.btn-white");
@@ -187,7 +223,10 @@ async function handleConfigurazionePerArticolo(articoloDaConfigurare: ArticoloDa
                 const attivitaModelloPanthCount: number = await countRowsInTBody(attivitaModelloPanthRowLocator, articoliPrisPage);
 
                 // Se il numero di attività non coincide, vai al modello successivo
-                if (attivitaModelloPanthCount !== elencoAttivitaModelloPrioritaJ.length) continue;
+                if (attivitaModelloPanthCount !== elencoAttivitaModelloPrioritaJ.length) {
+                    console.log(`Il numero di attività non coincide:\tpanth: ${attivitaModelloPanthCount}\tmodello priorità j: ${elencoAttivitaModelloPrioritaJ.length}`);
+                    continue;
+                }
 
                 let attivitaNonCoincidente: Attivita | undefined;
                 for (let j = 0; j < attivitaModelloPanthCount; j++) {
@@ -198,8 +237,8 @@ async function handleConfigurazionePerArticolo(articoloDaConfigurare: ArticoloDa
 
                     // Se una delle attività non coincide, vai al modello successivo
                     if (
-                        operazione !== elencoAttivitaModelloPrioritaJ[j].operazione ||
-                        codice !== elencoAttivitaModelloPrioritaJ[j].codice
+                        operazione.trim() !== elencoAttivitaModelloPrioritaJ[j].operazione.trim() ||
+                        codice.trim() !== elencoAttivitaModelloPrioritaJ[j].codice.trim()
                     ) {
                         attivitaNonCoincidente = elencoAttivitaModelloPrioritaJ[j];
                     }
@@ -216,7 +255,7 @@ async function handleConfigurazionePerArticolo(articoloDaConfigurare: ArticoloDa
             }
 
             if (!modelloTrovato) {
-                console.error(`Nessun modello trovato per l'articolo ${articoloDaConfigurare}`);
+                console.error(`${LOG_MESSAGE_PREFIX.NO_MODEL_FOUND}: nessun modello trovato, con le stesse attività, per l'articolo ${articoloDaConfigurare.prodotto}`);
                 // Chiudi la finestra con l'elenco dei modelli disponibili
                 await articoliPrisPage.click("#id_pris_articoli_modprod_modal > div > div > div.modal-footer > button.btn.btn-white");
                 // Chiudi la finestra "Configura Modello" (nuovo modello)
@@ -232,6 +271,10 @@ async function handleConfigurazionePerArticolo(articoloDaConfigurare: ArticoloDa
             // Mostra 100 attività
             await articoliPrisPage.selectOption("#id_table_pris_articoli_modprod_length > label > select", "100");
 
+            // Setta il costo industriale
+            console.log("COSTO INDUSTRIALE MODELLO:", costoIndustrialeModello);
+            await articoliPrisPage.fill("#id_pris_articoli_costo_industriale", String(costoIndustrialeModello));
+
             // Configura il modello nuovo con i parametri del modello vecchio (priorità J = vecchio)
             for (let i = 0, nth = 1; i < elencoAttivitaModelloPrioritaJ.length; i++, nth++) {
                 const attivita: Attivita = elencoAttivitaModelloPrioritaJ[i];
@@ -244,19 +287,32 @@ async function handleConfigurazionePerArticolo(articoloDaConfigurare: ArticoloDa
                     await attivitaModelloConfigRowLocator.locator("td:nth-child(8) > a").click();
                 }
                 if (attivita.costoAttivita.present && attivita.costoAttivita.value) {
-                    await attivitaModelloConfigRowLocator.locator("td:nth-child(9)").fill(String(attivita.costoAttivita));
+                    await attivitaModelloConfigRowLocator.locator("td:nth-child(9) > div > div > input").fill(String(attivita.costoAttivita));
                 }
             }
 
             await articoliPrisPage.evaluate(() => alert("Verifica la configurazione. Se ritieni che sia corretta, clicca su \"Salva\", altrimenti su \"Chiudi\". Clicca \"Ok\" per chiudere questo messaggio."));
 
-            // Aspetta che l'utente abbia schiacciato su "Chiudi" o "Salva"
-            await articoliPrisPage.locator("#id_pris_articoli_config_modal").waitFor({ state: "hidden", timeout: 0 });
+            const configurazioneSalvata: boolean = await articoliPrisPage.locator("#id_pris_articoli_config_modal").evaluate(async () => {
+                return await new Promise(resolve => {
+                    const btnSalva = document.querySelector("body > div.swal2-container > div.swal2-modal.hide-swal2 > button.swal2-confirm.styled");
+                    const btnChiudi = document.querySelector("#id_pris_articoli_configForm > div.modal-footer > button.btn.btn-white");
 
-            return {
-                ...articoloDaConfigurare,
-                priorita: elencoAttivitaModelloPrioritaJ[0].prioritaModello,
-            };
+                    btnSalva?.addEventListener("click", () => resolve(true));
+                    btnChiudi?.addEventListener("click", () => resolve(false));
+                });
+            });
+
+            if (!configurazioneSalvata) {
+                console.info(`${LOG_MESSAGE_PREFIX.CONFIGURATION_NOT_SAVED_BY_USER}: la configurazione non è stata salvata (è stato schiacciato "chiudi").`);
+            }
+
+            // Aspetta che l'utente abbia schiacciato su "Chiudi" o "Salva" e che il popup si sia chiuso
+            await articoliPrisPage.locator("#id_pris_articoli_config_modal").waitFor({ state: "hidden" });
+
+            return configurazioneSalvata
+                ? { ...articoloDaConfigurare, priorita: elencoAttivitaModelloPrioritaJ[0].prioritaModello }
+                : undefined;
 
             // // Fallback se le configurazioni trovate non vanno bene
             // const alertMessage: string = `Seleziona una configurazione da applicare per l'articolo:
@@ -274,24 +330,17 @@ async function handleConfigurazionePerArticolo(articoloDaConfigurare: ArticoloDa
         }
         catch (e) {
             console.error(e);
-
-            // TODO logga l'articolo da fare
-
             return undefined;
         }
     }
-
-    // TODO remove
-    return undefined;
 }
 
 (async function main() {
     applyLogLevel();
 
-    const articoliDaFare: ArticoloDaConfigurare[] = getArticoliDaFare();
-    const articoliDaFareCount: number = articoliDaFare.length;
+    const articoliDaConfigurare: Map<string, ArticoloDaConfigurare> = getArticoliDaConfigurare();
 
-    console.info("Articoli da fare:", articoliDaFare);
+    console.info("Articoli da fare:", articoliDaConfigurare);
 
     const browser = await chromium.launch({
         headless: false,
@@ -323,26 +372,32 @@ async function handleConfigurazionePerArticolo(articoloDaConfigurare: ArticoloDa
     await homepage.click("#id_li_beemo_pris_articoli > a");
 
     const articoliPrisPage = homepage;
-
-    const articoliFatti: ArticoloDaConfigurare[] = [];
-    for (const articoloDaFare of articoliDaFare) {
-        await articoliPrisPage.fill("#id_table_famiglie_filter > label > input", articoloDaFare.famiglia);
+    const articoliConfigurati: Map<string, ArticoloConfigurato> = new Map();
+    for (const [, articoloDaConfigurare] of articoliDaConfigurare) {
+        await articoliPrisPage.fill("#id_table_famiglie_filter > label > input", articoloDaConfigurare.famiglia);
         await articoliPrisPage.click("#id_table_famiglie > tbody > tr:nth-child(1)");
-        await articoliPrisPage.fill("#id_table_pris_articoli_filter > label > input", articoloDaFare.prodotto);
+        await articoliPrisPage.fill("#id_table_pris_articoli_filter > label > input", articoloDaConfigurare.prodotto);
 
         let configurazioniPerArticolo: number = await countRowsInTBody(
             articoliPrisPage.locator("#id_table_pris_articoli > tbody > tr"),
             articoliPrisPage
         );
 
-        console.info(`Configurazioni trovate per l'articolo ${articoloDaFare.prodotto}: ${configurazioniPerArticolo}`);
+        console.info(`Configurazioni trovate per [${articoloDaConfigurare.famiglia}, ${articoloDaConfigurare.prodotto}]: ${configurazioniPerArticolo}`);
 
         if (configurazioniPerArticolo === 0) {
-            console.error(`Nessuna configurazione trovata per l'articolo ${articoloDaFare.prodotto}`);
+            console.error(`${LOG_MESSAGE_PREFIX.NO_BEEMO_CONFIG_FOUND}: nessuna configurazione trovata per l'articolo ${articoloDaConfigurare.prodotto}`);
         }
         else {
             for (let nth = 1; nth <= configurazioniPerArticolo; nth++) {
-                await handleConfigurazionePerArticolo(articoloDaFare, articoliPrisPage, nth);
+                const articoloConfigurato: ArticoloConfigurato | undefined =
+                    await handleConfigurazionePerArticolo(articoloDaConfigurare, articoliPrisPage, nth);
+
+                if (articoloConfigurato) {
+                    console.info(`${LOG_MESSAGE_PREFIX.PRODUCT_CONFIGURED_SUCCESSFULLY}:\t${articoloConfigurato.prodotto}\t${articoloConfigurato.famiglia}\t${articoloConfigurato.priorita}`);
+                    articoliConfigurati.set(`${articoloConfigurato.famiglia}${articoloConfigurato.prodotto}`, articoloConfigurato);
+                    saveArticoliDaConfigurare(articoliDaConfigurare, articoliConfigurati);
+                }
             }
         }
     }
