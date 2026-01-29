@@ -2,6 +2,7 @@ import type { BrowserContext, Locator, Page } from "playwright";
 import { chromium } from "playwright";
 import * as fs from "node:fs";
 import dotenv from "dotenv";
+import { expect } from "playwright/test";
 
 type LogLevel = "log" | "info" | "warn" | "error";
 
@@ -211,7 +212,6 @@ async function handleConfigurazionePerArticolo(articoloDaConfigurare: ArticoloDa
             const modelliDisponibiliRowsLocator: Locator = articoliPrisPage.locator("#id_table_panth_modprod > tbody > tr");
             const modelliDisponibiliCount: number = await countRowsInTBody(modelliDisponibiliRowsLocator, articoliPrisPage);
 
-            let modelloTrovato: boolean = false;
             for (let i = 0; i < modelliDisponibiliCount; i++) {
                 // Clicca sul modello (i)
                 await modelliDisponibiliRowsLocator.nth(i).click();
@@ -224,7 +224,7 @@ async function handleConfigurazionePerArticolo(articoloDaConfigurare: ArticoloDa
 
                 // Se il numero di attività non coincide, vai al modello successivo
                 if (attivitaModelloPanthCount !== elencoAttivitaModelloPrioritaJ.length) {
-                    console.log(`Il numero di attività non coincide:\tpanth: ${attivitaModelloPanthCount}\tmodello priorità j: ${elencoAttivitaModelloPrioritaJ.length}`);
+                    console.info(`Il numero di attività non coincide:\tpanth: ${attivitaModelloPanthCount}\tmodello priorità j: ${elencoAttivitaModelloPrioritaJ.length}`);
                     continue;
                 }
 
@@ -235,7 +235,6 @@ async function handleConfigurazionePerArticolo(articoloDaConfigurare: ArticoloDa
                         await attivitaModelloPanthRowLocator.nth(j).locator("td:nth-child(2)").innerText(),
                     ];
 
-                    // Se una delle attività non coincide, vai al modello successivo
                     if (
                         operazione.trim() !== elencoAttivitaModelloPrioritaJ[j].operazione.trim() ||
                         codice.trim() !== elencoAttivitaModelloPrioritaJ[j].codice.trim()
@@ -244,93 +243,94 @@ async function handleConfigurazionePerArticolo(articoloDaConfigurare: ArticoloDa
                     }
                 }
 
-                if (!attivitaNonCoincidente) {
-                    // Se tutte le attività coincidono, seleziona il modello
-                    modelloTrovato = true;
-                    await modelliDisponibiliRowsLocator.nth(i).locator("td.text-left.all.dtr-control > a").click();
-                    break;
+                // Se una delle attività non coincide, vai al modello successivo
+                if (attivitaNonCoincidente) {
+                    console.info("La seguente attività non coincide:", attivitaNonCoincidente);
+                    continue;
                 }
 
-                console.info("La seguente attività non coincide:", attivitaNonCoincidente);
-            }
+                // Se tutte le attività coincidono, seleziona il modello
+                await modelliDisponibiliRowsLocator.nth(i).locator("td.text-left.all.dtr-control > a").click();
 
-            if (!modelloTrovato) {
-                console.error(`${LOG_MESSAGE_PREFIX.NO_MODEL_FOUND}: nessun modello trovato, con le stesse attività, per l'articolo ${articoloDaConfigurare.prodotto}`);
-                // Chiudi la finestra con l'elenco dei modelli disponibili
-                await articoliPrisPage.click("#id_pris_articoli_modprod_modal > div > div > div.modal-footer > button.btn.btn-white");
-                // Chiudi la finestra "Configura Modello" (nuovo modello)
-                await articoliPrisPage.click("#id_pris_articoli_configForm > div.modal-footer > button.btn.btn-white");
-                return undefined;
-            }
+                // Importa il modello
+                await articoliPrisPage.click("#id_pris_articoli_modprod_modal_importa");
+                // Aspetta che la finestra di importazione sia chiusa
+                await articoliPrisPage.locator("#id_pris_articoli_modprod_modal").waitFor({ state: "hidden", timeout: 0 });
 
-            // Importa il modello
-            await articoliPrisPage.click("#id_pris_articoli_modprod_modal_importa");
-            // Aspetta che la finestra di importazione sia chiusa
-            await articoliPrisPage.locator("#id_pris_articoli_modprod_modal").waitFor({ state: "hidden", timeout: 0 });
+                // Mostra 100 attività
+                await articoliPrisPage.selectOption("#id_table_pris_articoli_modprod_length > label > select", "100");
 
-            // Mostra 100 attività
-            await articoliPrisPage.selectOption("#id_table_pris_articoli_modprod_length > label > select", "100");
+                // Setta il costo industriale
+                await articoliPrisPage.fill("#id_pris_articoli_costo_industriale", String(costoIndustrialeModello));
 
-            // Setta il costo industriale
-            console.log("COSTO INDUSTRIALE MODELLO:", costoIndustrialeModello);
-            await articoliPrisPage.fill("#id_pris_articoli_costo_industriale", String(costoIndustrialeModello));
+                // Configura il modello nuovo con i parametri del modello vecchio (priorità J = vecchio)
+                for (let i = 0, nth = 1; i < elencoAttivitaModelloPrioritaJ.length; i++, nth++) {
+                    const attivita: Attivita = elencoAttivitaModelloPrioritaJ[i];
+                    const attivitaModelloConfigRowLocator: Locator = articoliPrisPage.locator(`#id_table_pris_articoli_modprod > tbody > tr:nth-child(${nth})`);
 
-            // Configura il modello nuovo con i parametri del modello vecchio (priorità J = vecchio)
-            for (let i = 0, nth = 1; i < elencoAttivitaModelloPrioritaJ.length; i++, nth++) {
-                const attivita: Attivita = elencoAttivitaModelloPrioritaJ[i];
-                const attivitaModelloConfigRowLocator: Locator = articoliPrisPage.locator(`#id_table_pris_articoli_modprod > tbody > tr:nth-child(${nth})`);
-
-                if (attivita.ok.present && attivita.ok.value) {
-                    await attivitaModelloConfigRowLocator.locator("td:nth-child(7) > a").click();
+                    if (attivita.ok.present && attivita.ok.value) {
+                        await attivitaModelloConfigRowLocator.locator("td:nth-child(7) > a").click();
+                    }
+                    if (attivita.ko.present && attivita.ko.value) {
+                        await attivitaModelloConfigRowLocator.locator("td:nth-child(8) > a").click();
+                    }
+                    if (attivita.costoAttivita.present && attivita.costoAttivita.value) {
+                        await attivitaModelloConfigRowLocator.locator("td:nth-child(9) > div > div > input").fill(String(attivita.costoAttivita));
+                    }
                 }
-                if (attivita.ko.present && attivita.ko.value) {
-                    await attivitaModelloConfigRowLocator.locator("td:nth-child(8) > a").click();
-                }
-                if (attivita.costoAttivita.present && attivita.costoAttivita.value) {
-                    await attivitaModelloConfigRowLocator.locator("td:nth-child(9) > div > div > input").fill(String(attivita.costoAttivita));
-                }
-            }
 
-            await articoliPrisPage.evaluate(() => alert("Verifica la configurazione. Se ritieni che sia corretta, clicca su \"Salva\", altrimenti su \"Chiudi\". Clicca \"Ok\" per chiudere questo messaggio."));
+                await articoliPrisPage.evaluate(() => alert("Verifica la configurazione. Se ritieni che sia corretta, clicca su \"Salva\", altrimenti su \"Chiudi\". Clicca \"Ok\" per chiudere questo messaggio."));
 
-            const configurazioneSalvata: boolean = await articoliPrisPage.locator("#id_pris_articoli_config_modal").evaluate(async () => {
-                return await new Promise(resolve => {
-                    const btnSalva = document.querySelector("body > div.swal2-container > div.swal2-modal.hide-swal2 > button.swal2-confirm.styled");
-                    const btnChiudi = document.querySelector("#id_pris_articoli_configForm > div.modal-footer > button.btn.btn-white");
+                const configurazioneSalvata: boolean = await articoliPrisPage.locator("#id_pris_articoli_config_modal").evaluate(async () => {
+                    return await new Promise(resolve => {
+                        const btnSalva = document.querySelector("body > div.swal2-container > div.swal2-modal.hide-swal2 > button.swal2-confirm.styled");
+                        const btnChiudi = document.querySelector("#id_pris_articoli_configForm > div.modal-footer > button.btn.btn-white");
 
-                    btnSalva?.addEventListener("click", () => resolve(true));
-                    btnChiudi?.addEventListener("click", () => resolve(false));
+                        btnSalva?.addEventListener("click", () => resolve(true));
+                        btnChiudi?.addEventListener("click", () => resolve(false));
+                    });
                 });
-            });
 
-            if (!configurazioneSalvata) {
-                console.info(`${LOG_MESSAGE_PREFIX.CONFIGURATION_NOT_SAVED_BY_USER}: la configurazione non è stata salvata (è stato schiacciato "chiudi").`);
+                if (!configurazioneSalvata) {
+                    console.info(`${LOG_MESSAGE_PREFIX.CONFIGURATION_NOT_SAVED_BY_USER}: la configurazione non è stata salvata (è stato schiacciato "chiudi").`);
+
+                }
+
+                const configurationAlreadyExistsToastLocator: Locator = articoliPrisPage.locator(
+                        "#toast-container > div > div.toast-message",
+                        { hasText: "SyntaxError: Unexpected end of JSON input" }
+                    );
+
+                try {
+                    // Se compare il toast che segnala che la configurazione per quel modello esiste già,
+                    // vai al modello successivo.
+                    await expect(configurationAlreadyExistsToastLocator).toHaveCount(1, { timeout: 2000 });
+
+                    // Clicca su "importa modello"
+                    await articoliPrisPage.click("#id_pris_articoli_modprod_import");
+                    continue;
+                }
+                catch {
+                    /* do nothing */
+                }
+
+                // Aspetta che il popup di configurazione del modello si sia chiuso
+                await articoliPrisPage.locator("#id_pris_articoli_config_modal").waitFor({ state: "hidden" });
+
+                return configurazioneSalvata
+                    ? { ...articoloDaConfigurare, priorita: elencoAttivitaModelloPrioritaJ[0].prioritaModello }
+                    : undefined;
             }
 
-            // Aspetta che l'utente abbia schiacciato su "Chiudi" o "Salva" e che il popup si sia chiuso
-            await articoliPrisPage.locator("#id_pris_articoli_config_modal").waitFor({ state: "hidden" });
-
-            return configurazioneSalvata
-                ? { ...articoloDaConfigurare, priorita: elencoAttivitaModelloPrioritaJ[0].prioritaModello }
-                : undefined;
-
-            // // Fallback se le configurazioni trovate non vanno bene
-            // const alertMessage: string = `Seleziona una configurazione da applicare per l'articolo:
-            //     \nCodice: ${articoloDaConfigurare.prodotto}
-            //     \nFamiglia: ${articoloDaConfigurare.famiglia}
-            //     \nID modello corrispondente (priorità J): ${elencoAttivitaModelloPrioritaJ[0].idModello}`;
-            //
-            // await articoliPrisPage.evaluate((msg: string) => alert(msg), alertMessage);
-            //
-            // // Aspetta che l'utente abbia schiacciato su "Chiudi" o "Importa"
-            // await articoliPrisPage.locator("#id_pris_articoli_modprod_modal").waitFor({ state: "hidden", timeout: 0 });
-            //
-            // // Aspetta che l'utente abbia configurato manualmente il modello
-
+            // Se sono arrivato fino a qui, vuol dire che non ho trovato nessun modello.
+            console.error(`${LOG_MESSAGE_PREFIX.NO_MODEL_FOUND}: nessun modello trovato, con le stesse attività, per l'articolo ${articoloDaConfigurare.prodotto}`);
+            // Chiudi la finestra con l'elenco dei modelli disponibili
+            await articoliPrisPage.click("#id_pris_articoli_modprod_modal > div > div > div.modal-footer > button.btn.btn-white");
+            // Chiudi la finestra "Configura Modello" (nuovo modello)
+            await articoliPrisPage.click("#id_pris_articoli_configForm > div.modal-footer > button.btn.btn-white");
         }
         catch (e) {
             console.error(e);
-            return undefined;
         }
     }
 }
@@ -374,7 +374,7 @@ async function handleConfigurazionePerArticolo(articoloDaConfigurare: ArticoloDa
     const articoliPrisPage = homepage;
     const articoliConfigurati: Map<string, ArticoloConfigurato> = new Map();
     for (const [, articoloDaConfigurare] of articoliDaConfigurare) {
-        await articoliPrisPage.fill("#id_table_famiglie_filter > label > input", articoloDaConfigurare.famiglia);
+        await articoliPrisPage.fill("#id_table_famiglie_filter > label > input", `${articoloDaConfigurare.famiglia} ${articoloDaConfigurare.prodotto}`);
         await articoliPrisPage.click("#id_table_famiglie > tbody > tr:nth-child(1)");
         await articoliPrisPage.fill("#id_table_pris_articoli_filter > label > input", articoloDaConfigurare.prodotto);
 
@@ -389,6 +389,7 @@ async function handleConfigurazionePerArticolo(articoloDaConfigurare: ArticoloDa
             console.error(`${LOG_MESSAGE_PREFIX.NO_BEEMO_CONFIG_FOUND}: nessuna configurazione trovata per l'articolo ${articoloDaConfigurare.prodotto}`);
         }
         else {
+            let save: boolean = true;
             for (let nth = 1; nth <= configurazioniPerArticolo; nth++) {
                 const articoloConfigurato: ArticoloConfigurato | undefined =
                     await handleConfigurazionePerArticolo(articoloDaConfigurare, articoliPrisPage, nth);
@@ -396,9 +397,12 @@ async function handleConfigurazionePerArticolo(articoloDaConfigurare: ArticoloDa
                 if (articoloConfigurato) {
                     console.info(`${LOG_MESSAGE_PREFIX.PRODUCT_CONFIGURED_SUCCESSFULLY}:\t${articoloConfigurato.prodotto}\t${articoloConfigurato.famiglia}\t${articoloConfigurato.priorita}`);
                     articoliConfigurati.set(`${articoloConfigurato.famiglia}${articoloConfigurato.prodotto}`, articoloConfigurato);
-                    saveArticoliDaConfigurare(articoliDaConfigurare, articoliConfigurati);
+                }
+                else {
+                    save = false;
                 }
             }
+            saveArticoliDaConfigurare(articoliDaConfigurare, articoliConfigurati);
         }
     }
 
